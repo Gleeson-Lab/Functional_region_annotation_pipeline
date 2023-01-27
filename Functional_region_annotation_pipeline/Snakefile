@@ -1,0 +1,563 @@
+configfile: "snake_conf.yaml"
+
+
+localrules:
+    all,
+    generate_avinput,
+    generate_bed,
+    generate_vcf_with_contig,
+    aggregate_func_anno_results,
+
+
+# recommand smaller for strelka
+# SPLITS = ["%02d" % x for x in range(10)]
+
+OUT_DIR = config["out_dir"]
+SCRATCH_DIR = config["scratch_dir"]
+
+BED_FILE = config["bed_file"]
+REF_FASTA = config["ref_fasta"]
+GNOMAD_AF = config["gnomad_af"]
+UCSC_RPMSK = config["ucsc_rpmsk"]
+
+
+ANNOVAR = config["annovar"]
+ANNOVAR_TABLE = config["annovar_table"]
+ANNOVAR_DB = config["annovar_db"]
+SPLICEAI = config["spliceai"]
+ANNOVAR_REGION_FUNC_DB = config["annovar_region_func_db"]
+GH_ANNO_DB = config["GH_anno_db"]
+CELL_LINES = config["cell_lines"].split(" ")
+HISTONE_TYPES = ["H3k27ac", "H3k27me3", "H3k4me1", "H3k4me3"]
+VCF_HEADER = config["vcf_header"]
+
+REPEAT_MASKER = config["repeat_masker"]
+SEGDUP = config["segdup"]
+
+HOMOPOLYMER_SCRIPT = config["homopolymer_script"]
+CI_SCRIPT = config["ci_script"]
+REGION_ANNO_SCRIPT = config["region_anno_script"]
+GH_ANNO_SCRIPT = config["GH_anno_script"]
+AGGREGATE_FUNC_ANNO_SCRIPT = config["aggregate_func_anno_script"]
+SUMMARIZE_SCRIPT = config["summarize_script"]
+
+ANNO_HEADER = [
+    "#ID",
+    "CHROM",
+    "POS",
+    "REF",
+    "ALT",
+    "ANNO",
+    "GENE",
+    "GNOMAD_FREQ",
+    "REPEAT_MASKER",
+    "SEGDUP",
+    "HOMOPOLYMER",
+    "REF_SEQ",
+    "DINUCLEOTIDE",
+    "NEAR_INDEL",
+    "UCSC_RPMSK",
+    "REF_COUNT",
+    "ALT_COUNT",
+    "MAF",
+    "LOWER_CI",
+    "UPPER_CI",
+    "CI_IS_GREATER",
+    "NORMAL_REF_COUNT",
+    "NORMAL_ALT_COUNT",
+    "NORMAL_MAF",
+    "NORMAL_LOWER_CI",
+    "NORMAL_UPPER_CI",
+    "NORMAL_CI_IS_GREATER",
+    "TUMOR_IS_BLOOD",
+    "TUMOR_IS_SPERM",
+]
+
+# get header for func_region_anno parts
+
+HISTONE_ANNO_HEADER = []
+for cell_line in CELL_LINES:
+    for histone_type in HISTONE_TYPES:
+        histone_anno_colname = (
+            "wgEncodeBroadHistone" + cell_line + histone_type + "StdPk" + "_Score"
+        )
+        HISTONE_ANNO_HEADER.append(histone_anno_colname)
+
+REGION_FUNC_ANNO_HEADER = (
+    [
+        "spliceAI",
+        "avsnp150",
+        "cosmic89",
+        "CADD13_RawScore",
+        "CADD13_PHRED",
+        "Eigen",
+        "FATHMM_noncoding",
+        "FATHMM_coding",
+    ]
+    + HISTONE_ANNO_HEADER
+    + [
+        "wgEncodeRegDnaseClusteredV3_Score",
+        "wgEncodeRegDnaseClusteredV3_Name",
+        "wgEncodeRegTfbsClusteredV3_Score",
+        "wgEncodeRegTfbsClusteredV3_Name",
+        "phastConsElements100way_Score",
+        "phastConsElements100way_Name",
+        "GH_ID",
+        "GH_is_element_elite",
+        "GH_reg_type",
+        "GH_gene_associations",
+        "GH_tissues",
+        "GH_TFBS",
+    ]
+)
+
+ANNO_ALL_HEADER = ANNO_HEADER + REGION_FUNC_ANNO_HEADER
+
+import pandas as pd
+import numpy as np
+import sys, os
+
+
+def make_input_dicts():
+    f = open(config["input_files"], "r")
+
+    tumor_dict = {}
+    normal_dict = {}
+    somatic_dict = {}
+    germline_dict = {}
+
+    for line in f:
+        if line.startswith("#"):
+            continue
+        words = line.rstrip().split("\t")
+        print(words)
+        sample_id = words[0].rstrip()
+        tumor_id = words[1].rstrip()
+        normal_id = words[2].rstrip()
+        tumor_path = words[3].rstrip()
+        normal_path = words[4].rstrip()
+        somatic_vcf_path = words[5].rstrip()
+        germline_vcf_path = words[6].rstrip()
+
+        tumor_dict[sample_id] = [tumor_id, tumor_path]
+        normal_dict[sample_id] = [normal_id, normal_path]
+        germline_dict[sample_id] = germline_vcf_path
+        somatic_dict[sample_id] = somatic_vcf_path
+    f.close()
+    return tumor_dict, normal_dict, somatic_dict, germline_dict
+
+
+TUMOR_DICT, NORMAL_DICT, SOMATIC_DICT, GERMLINE_DICT = make_input_dicts()
+
+
+rule all:
+    input:
+        OUT_DIR + "/final_summary.vcf",
+
+
+# generate 1-based avinput
+rule generate_avinput:
+    input:
+        vcf=lambda wildcards: SOMATIC_DICT[wildcards.sample],
+    output:
+        avinput=OUT_DIR + "/avinput/{sample}.avinput",
+    shell:
+        """ zcat {input.vcf} | grep -v "##" | grep "PASS" |  """
+        """ awk -v OFS="\\t" "\$5!~/,/ {{print \$1, \$2, \$2+length(\$4)-1, \$4, \$5}}"  """
+        """ >> {output.avinput} """
+
+
+# generate 0-based bed file
+rule generate_bed:
+    input:
+        vcf=lambda wildcards: SOMATIC_DICT[wildcards.sample],
+    output:
+        bed=OUT_DIR + "/bed/{sample}.bed",
+    shell:
+        """ zcat {input.vcf} | grep -v "##" | grep "PASS" |  """
+        """ awk -v OFS="\\t" "\$5!~/,/ {{print \$1, \$2-1, \$2+length(\$4)-2, \$4, \$5}}"  """
+        """ >> {output.bed} """
+
+
+rule generate_vcf_with_contig:
+    """
+    add contig and column names header
+    to vcf files for running spliceai
+    """
+    input:
+        vcf=lambda wildcards: SOMATIC_DICT[wildcards.sample],
+    output:
+        vcf_with_contig=OUT_DIR + "/vcf_with_contig/{sample}_with_contig.vcf",
+    shell:
+        "cat {VCF_HEADER} > {output.vcf_with_contig};"
+        "zcat {input.vcf}|cut --complement -f9,10 >> {output.vcf_with_contig}"
+
+
+'''
+#split avinput to smaller files
+rule split_avinput:
+    input:
+        avinput = OUT_DIR + "/avinput/{sample}.avinput",
+    output:
+        expand(SCRATCH_DIR + "/split_avinput/{{sample}}/{split}", split = SPLITS)
+    params:
+        outdir = SCRATCH_DIR + "/split_avinput/{sample}/"
+    shell:
+        """ split -d -l $(wc -l {input}|awk "{{print int((\$1+10-1)/10)}}") {input} {params.outdir} """
+'''
+
+
+# use Renee's package to process these entries
+rule check_homopolymer_dinucleotide_nearindel_rpmsk:
+    input:
+        avinput=OUT_DIR + "/avinput/{sample}.avinput",
+        germline_vcf=lambda wildcards: GERMLINE_DICT[wildcards.sample],
+    output:
+        outfile=OUT_DIR
+        + "/annotation/{sample}/{sample}.homopolymer_dinucleotide_nearindel_rpmsk",
+    params:
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    resources:
+        walltime=8,
+    shell:
+        "python {HOMOPOLYMER_SCRIPT}"
+        "    {input.avinput}"
+        "    {input.germline_vcf}"
+        "    {UCSC_RPMSK}"
+        "    {output.outfile}"
+
+
+# compute ci for this sample
+rule compute_tumor_MAF_and_CI:
+    input:
+        tumor_bam=lambda wildcards: TUMOR_DICT[wildcards.sample][1],
+        avinput=OUT_DIR + "/avinput/{sample}.avinput",
+    output:
+        outfile=OUT_DIR + "/annotation/{sample}/{sample}.tumor_maf_ci",
+    params:
+        outdir=SCRATCH_DIR + "/MAF_CI/{sample}/tumor_samtools_output/",
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    resources:
+        walltime=8,
+    shell:
+        "python {CI_SCRIPT}"
+        "    {input.tumor_bam}"
+        "    {input.avinput}"
+        "    {params.outdir}"
+        "    {output.outfile}"
+
+
+# compute ci for the corresponding normal sample
+rule compute_normal_MAF_and_CI:
+    input:
+        normal_bam=lambda wildcards: NORMAL_DICT[wildcards.sample][1],
+        avinput=OUT_DIR + "/avinput/{sample}.avinput",
+    output:
+        outfile=OUT_DIR + "/annotation/{sample}/{sample}.normal_maf_ci",
+    params:
+        outdir=SCRATCH_DIR + "/MAF_CI/{sample}/normal_samtools_output/",
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    resources:
+        walltime=8,
+    shell:
+        "python {CI_SCRIPT}"
+        "    {input.normal_bam}"
+        "    {input.avinput}"
+        "    {params.outdir}"
+        "    {output.outfile}"
+
+
+"""
+#gather results for homopolymer, dinucleotide, near_indeal, and rpmsk together
+rule gather_homopolyer_results:
+    input:
+        expand(SCRATCH_DIR + "/split_annotation/{{sample}}/{split}.homopolymer_dinucleotide_nearindel_rpmsk", split=SPLITS)
+    output:
+        outfile = OUT_DIR + "/annotation/{sample}/{sample}.homopolymer_dinucleotide_nearindel_rpmsk",
+    params:
+        cluster = "-q home -l walltime=2:00:00"
+    run:
+        print(output.outfile)
+        wfile = open(output.outfile, "w")
+        for file in input:
+            print(file)
+            with open(file, "r") as f:
+                for line in f:
+                    wfile.write(line)
+        wfile.close()
+
+
+#gather ci results for tumor sample
+rule gather_tumor_ci_results:
+    input:
+        expand(SCRATCH_DIR + "/split_annotation/{{sample}}/{split}.tumor_maf_ci", split=SPLITS)
+    output:
+        outfile = OUT_DIR + "/annotation/{sample}/{sample}.tumor_maf_ci",
+    params:
+        cluster = "-q home -l walltime=2:00:00"
+    run:
+        wfile = open(output.outfile, "w")
+        for file in input:
+            print(file)
+            with open(file, "r") as f:
+                for line in f:
+                    if line.startswith("#"):
+                        continue
+                    wfile.write(line)
+        wfile.close()
+
+#gather ci results for normal sample
+rule gather_normal_ci_results:
+    input:
+        expand(SCRATCH_DIR + "/split_annotation/{{sample}}/{split}.normal_maf_ci", split=SPLITS)
+    output:
+        outfile = OUT_DIR + "/annotation/{sample}/{sample}.normal_maf_ci",
+    params:
+        cluster = "-q home -l walltime=2:00:00"
+    run:
+        wfile = open(output.outfile, "w")
+        for file in input:
+            print(file)
+            with open(file, "r") as f:
+                for line in f:
+                    if line.startswith("#"):
+                        continue
+                    wfile.write(line)
+        wfile.close()
+"""
+
+
+# get annovar annotation
+rule annovar_geneanno:
+    input:
+        avinput=OUT_DIR + "/avinput/{sample}.avinput",
+    output:
+        vcf=OUT_DIR + "/annotation/{sample}/{sample}.variant_function",
+        exonic_vf=OUT_DIR + "/annotation/{sample}/{sample}.exonic_variant_function",
+    params:
+        outfile=OUT_DIR + "/annotation/{sample}/{sample}",
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    resources:
+        walltime=8,
+    shell:
+        "{ANNOVAR} -geneanno"
+        "    -build hg19"
+        "    -dbtype refGene"
+        "    {input.avinput}"
+        "    {ANNOVAR_DB}"
+        "    -outfile {params.outfile}"
+
+
+# get gnomad annotation
+rule annovar_gnomad:
+    input:
+        avinput=OUT_DIR + "/avinput/{sample}.avinput",
+    output:
+        dropped=OUT_DIR + "/annotation/{sample}/{sample}.hg19_gnomad_genome_dropped",
+        filtered=OUT_DIR + "/annotation/{sample}/{sample}.hg19_gnomad_genome_filtered",
+    params:
+        outfile=OUT_DIR + "/annotation/{sample}/{sample}",
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    resources:
+        walltime=8,
+    shell:
+        "{ANNOVAR} -filter"
+        "    -build hg19"
+        "    -dbtype gnomad_genome"
+        "    {input.avinput}"
+        "    {ANNOVAR_DB}"
+        "    -outfile {params.outfile}"
+
+
+rule check_repeats:
+    input:
+        bed=OUT_DIR + "/bed/{sample}.bed",
+    output:
+        outfile=OUT_DIR + "/annotation/{sample}/{sample}.repeats_annotation",
+    params:
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    resources:
+        walltime=8,
+    shell:
+        "module load bedtools;"
+        "bedtools annotate"
+        "    -i {input.bed}"
+        "    -files {REPEAT_MASKER} {SEGDUP}"
+        ">>{output.outfile};"
+
+
+rule spliceai:
+    """
+    run spliceai to identify possible splice variants from the vcf input
+    """
+    input:
+        vcf_with_contig=OUT_DIR + "/vcf_with_contig/{sample}_with_contig.vcf",
+    output:
+        spliceai_vcf=OUT_DIR + "/annotation/{sample}/{sample}_spliceai.vcf",
+    params:
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    resources:
+        walltime=8,
+    conda:
+        "/projects/ps-gleesonlab7/Pipelines/DNA_WES_AmpliSeq_mosaic_variant_calling_Xiaoxu/10_Functional_annotation_Jiawei/envs/spliceai.yaml",
+    shell:
+        "{SPLICEAI}"
+        "   -I {input.vcf_with_contig}"
+        "   -O {output.spliceai_vcf}"
+        "   -R {REF_FASTA}"
+        "   -A grch37"
+
+
+rule func_score_annotation:
+    """
+    run filter-based annotation to annotate
+    avinput with various functional scores
+    (SNVs only)
+    """
+    input:
+        avinput=OUT_DIR + "/avinput/{sample}.avinput",
+    output:
+        func_score_anno_vcf=OUT_DIR + "/annotation/{sample}/{sample}.hg19_multianno.txt",
+    params:
+        avoutput_prefix=OUT_DIR + "/annotation/{sample}/{sample}",
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    resources:
+        walltime=8,
+    shell:
+        "{ANNOVAR_TABLE} {input.avinput}"
+        "   {ANNOVAR_REGION_FUNC_DB}"
+        "   -buildver hg19"
+        "   -out {params.avoutput_prefix}"
+        "   -protocol avsnp150,cosmic89,cadd13,eigen,fathmm"
+        "   -operation f,f,f,f,f"
+        "   -nastring . ;"
+
+
+rule region_annotation:
+    """
+    run region-based annoation to determine
+    whether a variant falls within genomic 
+    regions of particular interest
+    """
+    input:
+        avinput=OUT_DIR + "/avinput/{sample}.avinput",
+    output:
+        region_anno_vcf=OUT_DIR + "/annotation/{sample}/{sample}_region_anno.vcf",
+    params:
+        tumor_id=lambda wildcards: TUMOR_DICT[wildcards.sample][0],
+        avoutput_dir=SCRATCH_DIR + "/region_anno/{sample}",
+        cell_lines=" ".join(CELL_LINES),
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    resources:
+        walltime=8,
+    shell:
+        "python {REGION_ANNO_SCRIPT}"
+        "   {params.tumor_id}"
+        "   {input.avinput}"
+        "   {ANNOVAR_REGION_FUNC_DB}"
+        "   {params.avoutput_dir}"
+        "   {output.region_anno_vcf}"
+        "   {params.cell_lines}"
+
+
+rule GH_annotation:
+    """
+    run region-based annotation to annotate
+    variants with Genehancer element and 
+    gene association database
+    """
+    input:
+        avinput=OUT_DIR + "/avinput/{sample}.avinput",
+    output:
+        GH_anno_vcf=OUT_DIR + "/annotation/{sample}/{sample}_GH_anno.vcf",
+    params:
+        tumor_id=lambda wildcards: TUMOR_DICT[wildcards.sample][0],
+        avoutput_dir=SCRATCH_DIR + "/GH_anno/{sample}",
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    resources:
+        walltime=8,
+    shell:
+        "python {GH_ANNO_SCRIPT}"
+        "   {params.tumor_id}"
+        "   {input.avinput}"
+        "   {GH_ANNO_DB}"
+        "   {params.avoutput_dir}"
+        "   {output.GH_anno_vcf}"
+
+
+rule aggregate_func_anno_results:
+    """
+    Combine all functional and region annotation results
+    and save them in a single aggregated output vcf file
+    """
+    input:
+        spliceai_vcf=OUT_DIR + "/annotation/{sample}/{sample}_spliceai.vcf",
+        func_score_anno_vcf=OUT_DIR + "/annotation/{sample}/{sample}.hg19_multianno.txt",
+        region_anno_vcf=OUT_DIR + "/annotation/{sample}/{sample}_region_anno.vcf",
+        GH_anno_vcf=OUT_DIR + "/annotation/{sample}/{sample}_GH_anno.vcf",
+    output:
+        func_anno_all_vcf=OUT_DIR + "/annotation/{sample}/{sample}_func_anno_all.vcf",
+    params:
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    shell:
+        "python {AGGREGATE_FUNC_ANNO_SCRIPT}"
+        "   {input.spliceai_vcf}"
+        "   {input.func_score_anno_vcf}"
+        "   {input.region_anno_vcf}"
+        "   {input.GH_anno_vcf}"
+        "   {output.func_anno_all_vcf}"
+
+
+rule summarize_result:
+    input:
+        exon_vf=OUT_DIR + "/annotation/{sample}/{sample}.exonic_variant_function",
+        vf=OUT_DIR + "/annotation/{sample}/{sample}.variant_function",
+        gnomad_dropped=OUT_DIR
+        + "/annotation/{sample}/{sample}.hg19_gnomad_genome_dropped",
+        repeats=OUT_DIR + "/annotation/{sample}/{sample}.repeats_annotation",
+        homopolymer=OUT_DIR
+        + "/annotation/{sample}/{sample}.homopolymer_dinucleotide_nearindel_rpmsk",
+        tumor_ci=OUT_DIR + "/annotation/{sample}/{sample}.tumor_maf_ci",
+        normal_ci=OUT_DIR + "/annotation/{sample}/{sample}.normal_maf_ci",
+        func_anno_all_vcf=OUT_DIR + "/annotation/{sample}/{sample}_func_anno_all.vcf",
+    output:
+        outfile=OUT_DIR + "/results/{sample}.vcf",
+    params:
+        tumor_id=lambda wildcards: TUMOR_DICT[wildcards.sample][0],
+        cluster="-q home -l nodes=1:ppn=1 -l walltime=8:00:00",
+    resources:
+        walltime=8,
+    shell:
+        "python {SUMMARIZE_SCRIPT}"
+        "       {params.tumor_id}"
+        "       {input.exon_vf}"
+        "       {input.vf}"
+        "       {input.gnomad_dropped}"
+        "       {input.repeats}"
+        "       {input.homopolymer}"
+        "       {input.tumor_ci}"
+        "       {input.normal_ci}"
+        "       {input.func_anno_all_vcf}"
+        "       {output.outfile}"
+
+
+rule merge_results:
+    input:
+        expand(OUT_DIR + "/results/{sample}.vcf", sample=TUMOR_DICT.keys()),
+    output:
+        outfile=OUT_DIR + "/final_summary.vcf",
+    params:
+        cluster="-q home -l walltime=2:00:00",
+    resources:
+        walltime=8,
+    run:
+        wfile = open(output.outfile, "w")
+        wfile.write("\t".join(ANNO_ALL_HEADER) + "\n")
+        for file in input:
+            print(file)
+            with open(file, "r") as f:
+                for line in f:
+                    if line.startswith("#"):
+                        continue
+                    wfile.write(line)
+        wfile.close()

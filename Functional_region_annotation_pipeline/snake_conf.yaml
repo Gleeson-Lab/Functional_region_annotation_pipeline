@@ -1,0 +1,45 @@
+#INPUT 
+input_files : "/home/jis215/scripts/Anno_func_region/input_files.txt"
+
+# OUTPUT
+out_dir : "/home/jis215/scripts/Anno_func_region/snakemake_test"
+scratch_dir : "/home/jis215/scripts/Anno_func_region/snakemake_test/scratch"
+
+# SOFTWARE
+gatk4 : "/projects/ps-gleesonlab7/gleeson3/rdg/src/gatk-4.0.4.0/gatk"
+annovar : "/home/xiy010/tools/annovar/annotate_variation.pl"
+annovar_table: "/home/jis215/tools/annovar/table_annovar.pl"
+annovar_db : "/home/xiy010/tools/annovar/humandb/"
+spliceai: "/home/jis215/anaconda3/envs/spliceai/bin/spliceai"
+
+
+# SCRIPTS
+homopolymer_script : "/projects/ps-gleesonlab7/gleeson6/4dbsm/jun_2019/MosaicCalls/Mutect2_Strelka2_Only2/helper_scripts/compute_homopolymer_dinucleotide_nearindel_rpmsk.py"
+ci_script : "/projects/ps-gleesonlab7/gleeson6/4dbsm/jun_2019/MosaicCalls/Mutect2_Strelka2_Only2/helper_scripts/run_samtools_and_compute_ci_04_23_22_debug_no_split.py"
+region_anno_script : "/projects/ps-gleesonlab7/Pipelines/DNA_WES_AmpliSeq_mosaic_variant_calling_Xiaoxu/10_Functional_annotation_Jiawei/scripts/region_annotation.py"
+GH_anno_script : "/projects/ps-gleesonlab7/Pipelines/DNA_WES_AmpliSeq_mosaic_variant_calling_Xiaoxu/10_Functional_annotation_Jiawei/scripts/GH_annotation.py"
+aggregate_func_anno_script : "/projects/ps-gleesonlab7/Pipelines/DNA_WES_AmpliSeq_mosaic_variant_calling_Xiaoxu/10_Functional_annotation_Jiawei/scripts/aggregate_func_anno.py"
+summarize_script : "/projects/ps-gleesonlab7/Pipelines/DNA_WES_AmpliSeq_mosaic_variant_calling_Xiaoxu/10_Functional_annotation_Jiawei/scripts/summarize_result_func_anno.py"
+
+# REFERENCE FILES
+bed_file : "/projects/ps-gleesonlab7/gleeson6/4dbsm/files_for_pipelines/wgs_nochr.bed"
+ref_fasta : "/projects/ps-gleesonlab7/gleeson3/reference_fasta/human_g1k_v37_decoy.fasta"
+
+#gnomad : "/projects/ps-gleesonlab3/rdg/genomes/hg19/gnomad.genomes.r2.0.1.sites.noVEP.vcf.gz"
+gnomad_af : "/projects/ps-gleesonlab7/gleeson6/4dbsm/files_for_pipelines/af-only-gnomad.raw.sites.b37.vcf.gz"
+ucsc_rpmsk : "/projects/ps-gleesonlab5/user/xiy010/pipeline/mutect2_strelka2/ref_files/rpmsk.txt"
+repeat_masker : "/projects/ps-gleesonlab5/user/xiy010/pipeline/mutect2_strelka2/ref_files/all_repeats.b37.bed"
+segdup : "/projects/ps-gleesonlab5/user/xiy010/pipeline/mutect2_strelka2/ref_files/segdup.hg19.bed"
+
+
+#Database for region-based and filter-based annotations:
+annovar_region_func_db : "/projects/ps-gleesonlab7/gleeson3/resources/annovar_grch37"
+GH_anno_db : "/home/jis215/GH_annotation"
+
+#specify the cell lines for the histone modification annotations (separated by space)
+#avaliable cell lines: Gm12878, H1hesc, Hmec, Hsmm, Huvec, K562, Nha, Nhek, Nhl
+#for annotating variants associated with neurodevelopmental disorders, I have set the cell_lines config to H1hesc and Nha
+cell_lines : "H1hesc Nha"
+
+#add contig and and column names header to vcf files for running spliceai
+vcf_header : "/projects/ps-gleesonlab7/Pipelines/DNA_WES_AmpliSeq_mosaic_variant_calling_Xiaoxu/10_Functional_annotation_Jiawei/vcf_header.txt"
